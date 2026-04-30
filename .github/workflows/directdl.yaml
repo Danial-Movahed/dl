@@ -40,7 +40,7 @@ jobs:
         FILE_ID="${{ github.event.inputs.file_url }}"
         OUTPUT_FILE="${{ github.event.inputs.filename }}"
         
-        wget "${FILE_ID}" --output "${OUTPUT_FILE}"
+        wget "${FILE_ID}" --output-file "${OUTPUT_FILE}"
         
         echo "Downloaded: ${OUTPUT_FILE}"
         FILE_SIZE=$(stat -c%s "${OUTPUT_FILE}")
