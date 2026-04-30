@@ -1,0 +1,148 @@
+name: Download and Push Large Files from direct
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'File URL'
+        required: true
+      filename:
+        description: 'Output filename (e.g., dataset.zip or archive.7z)'
+        required: true
+      split_size:
+        description: 'Split size for 7z archives (e.g., 100M, 1G) - leave empty for no splitting'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y p7zip-full wget unzip
+    
+    
+  
+    - name: Download file
+      id: download
+      run: |
+        FILE_ID="${{ github.event.inputs.file_url }}"
+        OUTPUT_FILE="${{ github.event.inputs.filename }}"
+        
+        wget "${FILE_ID}" --output "${OUTPUT_FILE}"
+        
+        echo "Downloaded: ${OUTPUT_FILE}"
+        FILE_SIZE=$(stat -c%s "${OUTPUT_FILE}")
+        echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
+        
+        # Convert to human-readable size
+        if [ $FILE_SIZE -gt 1073741824 ]; then
+          HUMAN_SIZE=$(echo "scale=2; $FILE_SIZE/1073741824" | bc)G
+        elif [ $FILE_SIZE -gt 1048576 ]; then
+          HUMAN_SIZE=$(echo "scale=2; $FILE_SIZE/1048576" | bc)M
+        else
+          HUMAN_SIZE=$(echo "scale=2; $FILE_SIZE/1024" | bc)K
+        fi
+        echo "Downloaded file size: $HUMAN_SIZE"
+    
+    - name: Split file using 7z (if needed)
+      if: github.event.inputs.split_size != ''
+      run: |
+        INPUT_FILE="${{ github.event.inputs.filename }}"
+        
+        # Create directory for split archives
+        mkdir -p split_files
+        
+        # Split into volumes of specified size
+        SPLIT_SIZE="${{ github.event.inputs.split_size }}"
+        7z a -v${SPLIT_SIZE} "split_files/${INPUT_FILE}.7z" "${INPUT_FILE}"
+        
+        # Remove original file after splitting
+        rm -f "${INPUT_FILE}"
+        
+        echo "File split into volumes of size: ${SPLIT_SIZE}"
+        echo "Split archive count: $(ls split_files/*.7z* 2>/dev/null | wc -l)"
+    
+    - name: Prepare files for commit
+      run: |
+        # If splitting was done, move split files to root directory
+        if [ -d "split_files" ] && [ "$(ls -A split_files 2>/dev/null)" ]; then
+          mv split_files/* .
+          rmdir split_files
+          echo "Moved split archives to root directory"
+        fi
+        
+        # List files to be committed
+        echo "Files to commit:"
+        ls -lh ${{ github.event.inputs.filename }}* 2>/dev/null || echo "No files found"
+    
+    - name: Configure Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global http.postBuffer 524288000
+    
+    - name: Push files one by one to avoid 500 error
+      run: |
+        # Get all split files
+        files=$(ls ${{ github.event.inputs.filename }}* 2>/dev/null || echo "")
+        
+        if [ -z "$files" ]; then
+          echo "No files to push"
+          exit 0
+        fi
+        
+        echo "Found files to push:"
+        echo "$files"
+        
+        # Push each file individually
+        for file in $files; do
+          echo "========================================="
+          echo "Pushing file: $file"
+          echo "========================================="
+          
+          # Add single file
+          git add "$file"
+          
+          # Commit single file
+          git commit -m "Add $file [skip ci]"
+          
+          # Push single file with retry
+          for attempt in 1 2 3; do
+            echo "Push attempt $attempt for $file"
+            if git push origin HEAD:${GITHUB_REF_NAME}; then
+              echo "✅ Successfully pushed $file"
+              break
+            else
+              echo "⚠️ Push failed for $file (attempt $attempt/3)"
+              if [ $attempt -lt 3 ]; then
+                echo "Waiting 10 seconds before retry..."
+                sleep 10
+              else
+                echo "❌ Failed to push $file after 3 attempts"
+                exit 1
+              fi
+            fi
+          done
+          
+          # Small delay between files to avoid rate limiting
+          sleep 2
+        done
+        
+        echo "========================================="
+        echo "✅ All files pushed successfully!"
+        echo "========================================="
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
